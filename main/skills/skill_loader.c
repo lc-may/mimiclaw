@@ -1,10 +1,12 @@
 #include "skills/skill_loader.h"
 #include "mimi_config.h"
 
+#include "linux/linux_compat.h"
+#include "linux/linux_paths.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <dirent.h>
-#include "esp_log.h"
 
 static const char *TAG = "skills";
 
@@ -41,7 +43,7 @@ static const char *TAG = "skills";
     "\n" \
     "## How to use\n" \
     "1. Use get_current_time for today's date\n" \
-    "2. Read " MIMI_SPIFFS_MEMORY_DIR "/MEMORY.md for user preferences and context\n" \
+    "2. Read " MIMI_MEMORY_FILE " for user preferences and context\n" \
     "3. Read today's daily note if it exists\n" \
     "4. Use web_search for relevant news based on user interests\n" \
     "5. Compile a concise briefing covering:\n" \
@@ -105,8 +107,12 @@ static const builtin_skill_t s_builtins[] = {
 
 static void install_builtin(const builtin_skill_t *skill)
 {
-    char path[64];
-    snprintf(path, sizeof(path), "%s%s.md", MIMI_SKILLS_PREFIX, skill->filename);
+    char rel_path[128];
+    char path[256];
+    snprintf(rel_path, sizeof(rel_path), "skills/%s.md", skill->filename);
+    if (mimi_get_full_path(rel_path, path, sizeof(path)) != 0) {
+        return;
+    }
 
     /* Check if already exists */
     FILE *f = fopen(path, "r");
@@ -202,33 +208,31 @@ static void extract_description(FILE *f, char *out, size_t out_size)
 
 size_t skill_loader_build_summary(char *buf, size_t size)
 {
-    DIR *dir = opendir(MIMI_SPIFFS_BASE);
+    char skills_dir[256];
+    if (mimi_get_full_path("skills", skills_dir, sizeof(skills_dir)) != 0) {
+        buf[0] = '\0';
+        return 0;
+    }
+
+    DIR *dir = opendir(skills_dir);
     if (!dir) {
-        ESP_LOGW(TAG, "Cannot open SPIFFS for skill enumeration");
+        ESP_LOGW(TAG, "Cannot open skills directory for enumeration");
         buf[0] = '\0';
         return 0;
     }
 
     size_t off = 0;
     struct dirent *ent;
-    /* SPIFFS readdir returns filenames relative to the mount point (e.g. "skills/weather.md").
-       We match entries that start with "skills/" and end with ".md". */
-    const char *skills_subdir = "skills/";
-    const size_t subdir_len = strlen(skills_subdir);
 
     while ((ent = readdir(dir)) != NULL && off < size - 1) {
         const char *name = ent->d_name;
-
-        /* Match files under skills/ with .md extension */
-        if (strncmp(name, skills_subdir, subdir_len) != 0) continue;
-
         size_t name_len = strlen(name);
-        if (name_len < subdir_len + 4) continue;  /* at least "skills/x.md" */
+        if (name_len < 4) continue;
         if (strcmp(name + name_len - 3, ".md") != 0) continue;
 
         /* Build full path */
         char full_path[296];
-        snprintf(full_path, sizeof(full_path), "%s/%s", MIMI_SPIFFS_BASE, name);
+        snprintf(full_path, sizeof(full_path), "%s/%s", skills_dir, name);
 
         FILE *f = fopen(full_path, "r");
         if (!f) continue;

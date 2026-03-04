@@ -4,7 +4,7 @@
 
 #include <string.h>
 #include <time.h>
-#include "esp_log.h"
+#include "linux/linux_compat.h"
 #include "cJSON.h"
 
 static const char *TAG = "tool_cron";

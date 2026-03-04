@@ -1,6 +1,6 @@
 #include "message_bus.h"
 #include "mimi_config.h"
-#include "esp_log.h"
+#include "linux/linux_compat.h"
 #include <string.h>
 
 static const char *TAG = "bus";

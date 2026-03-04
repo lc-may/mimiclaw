@@ -3,14 +3,12 @@
 #include "bus/message_bus.h"
 #include "proxy/http_proxy.h"
 
+#include "linux/linux_compat.h"
+#include "linux/linux_http.h"
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include "esp_log.h"
-#include "esp_timer.h"
-#include "esp_http_client.h"
-#include "esp_crt_bundle.h"
-#include "nvs.h"
 #include "cJSON.h"
 
 static const char *TAG = "telegram";
@@ -194,7 +192,7 @@ static char *tg_api_call_via_proxy(const char *path, const char *post_data)
     return result;
 }
 
-/* ── Direct path: esp_http_client ───────────────────────────── */
+/* ── Direct path: libcurl-backed HTTP client ───────────────────────────── */
 
 static char *tg_api_call_direct(const char *method, const char *post_data)
 {
@@ -215,7 +213,6 @@ static char *tg_api_call_direct(const char *method, const char *post_data)
         .timeout_ms = (MIMI_TG_POLL_TIMEOUT_S + 5) * 1000,
         .buffer_size = 2048,
         .buffer_size_tx = 2048,
-        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);

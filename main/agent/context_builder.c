@@ -5,12 +5,19 @@
 
 #include <stdio.h>
 #include <string.h>
-#include "esp_log.h"
+#include "linux/linux_compat.h"
+#include "linux/linux_paths.h"
 
 static const char *TAG = "context";
 
 static size_t append_file(char *buf, size_t size, size_t offset, const char *path, const char *header)
 {
+    char resolved[256];
+    if (mimi_get_full_path(path, resolved, sizeof(resolved)) != 0) {
+        return offset;
+    }
+    path = resolved;
+
     FILE *f = fopen(path, "r");
     if (!f) return offset;
 
@@ -31,7 +38,7 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
 
     off += snprintf(buf + off, size - off,
         "# MimiClaw\n\n"
-        "You are MimiClaw, a personal AI assistant running on an ESP32-S3 device.\n"
+        "You are MimiClaw, a personal AI assistant running as a native Linux service.\n"
         "You communicate through Telegram and WebSocket.\n\n"
         "Be helpful, accurate, and concise.\n\n"
         "## Available Tools\n"
@@ -40,7 +47,7 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
         "Use this when you need up-to-date facts, news, weather, or anything beyond your training data.\n"
         "- get_current_time: Get the current date and time. "
         "You do NOT have an internal clock — always use this tool when you need to know the time or date.\n"
-        "- read_file: Read a file (path must start with " MIMI_SPIFFS_BASE "/).\n"
+        "- read_file: Read a file (path must start with " MIMI_DATA_HOME "/).\n"
         "- write_file: Write/overwrite a file.\n"
         "- edit_file: Find-and-replace edit a file.\n"
         "- list_dir: List files, optionally filter by prefix.\n"
@@ -50,9 +57,9 @@ esp_err_t context_build_system_prompt(char *buf, size_t size)
         "When using cron_add for Telegram delivery, always set channel='telegram' and a valid numeric chat_id.\n\n"
         "Use tools when needed. Provide your final answer as text after using tools.\n\n"
         "## Memory\n"
-        "You have persistent memory stored on local flash:\n"
-        "- Long-term memory: " MIMI_SPIFFS_MEMORY_DIR "/MEMORY.md\n"
-        "- Daily notes: " MIMI_SPIFFS_MEMORY_DIR "/daily/<YYYY-MM-DD>.md\n\n"
+        "You have persistent memory stored on local disk:\n"
+        "- Long-term memory: " MIMI_MEMORY_DIR "/MEMORY.md\n"
+        "- Daily notes: " MIMI_MEMORY_DIR "/<YYYY-MM-DD>.md\n\n"
         "IMPORTANT: Actively use memory to remember things across conversations.\n"
         "- When you learn something new about the user (name, preferences, habits, context), write it to MEMORY.md.\n"
         "- When something noteworthy happens in a conversation, append it to today's daily note.\n"

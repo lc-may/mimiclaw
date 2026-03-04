@@ -7,9 +7,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <ctype.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
-#include "esp_log.h"
+#include "linux/linux_compat.h"
+#include "linux/linux_paths.h"
 
 static const char *TAG = "heartbeat";
 
@@ -30,7 +29,12 @@ static TimerHandle_t s_heartbeat_timer = NULL;
  */
 static bool heartbeat_has_tasks(void)
 {
-    FILE *f = fopen(MIMI_HEARTBEAT_FILE, "r");
+    char path[256];
+    if (mimi_get_full_path(MIMI_PATH_HEARTBEAT, path, sizeof(path)) != 0) {
+        return false;
+    }
+
+    FILE *f = fopen(path, "r");
     if (!f) {
         return false;
     }
@@ -115,8 +119,13 @@ static void heartbeat_timer_callback(TimerHandle_t xTimer)
 
 esp_err_t heartbeat_init(void)
 {
+    char path[256];
+    if (mimi_get_full_path(MIMI_PATH_HEARTBEAT, path, sizeof(path)) != 0) {
+        return ESP_FAIL;
+    }
+
     ESP_LOGI(TAG, "Heartbeat service initialized (file: %s, interval: %ds)",
-             MIMI_HEARTBEAT_FILE, MIMI_HEARTBEAT_INTERVAL_MS / 1000);
+             path, MIMI_HEARTBEAT_INTERVAL_MS / 1000);
     return ESP_OK;
 }
 

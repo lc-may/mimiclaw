@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esp_err.h"
+#include "linux/linux_compat.h"
 #include <stddef.h>
 
 /**
@@ -11,4 +11,3 @@
  * @param size  Buffer size
  */
 esp_err_t context_build_system_prompt(char *buf, size_t size);
-

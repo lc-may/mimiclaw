@@ -1,7 +1,15 @@
+/**
+ * @file serial_cli.c
+ * @brief Linux CLI using stdio
+ *
+ * Commands are dispatched via a simple string-based lookup table.
+ */
+
 #include "serial_cli.h"
 #include "mimi_config.h"
-#include "wifi/wifi_manager.h"
+#if MIMI_ENABLE_TELEGRAM
 #include "telegram/telegram_bot.h"
+#endif
 #include "llm/llm_proxy.h"
 #include "memory/memory_store.h"
 #include "memory/session_mgr.h"
@@ -12,123 +20,250 @@
 #include "heartbeat/heartbeat.h"
 #include "skills/skill_loader.h"
 
-#include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <ctype.h>
 #include <dirent.h>
-#include "esp_log.h"
-#include "esp_console.h"
-#include "esp_system.h"
-#include "esp_heap_caps.h"
-#include "nvs_flash.h"
-#include "nvs.h"
-#include "argtable3/argtable3.h"
+
+#include "linux/linux_compat.h"
+#include "linux/linux_paths.h"
 
 static const char *TAG = "cli";
 
-/* --- wifi_set command --- */
-static struct {
-    struct arg_str *ssid;
-    struct arg_str *password;
-    struct arg_end *end;
-} wifi_set_args;
+/* Volatile flag for graceful shutdown */
+static volatile int g_cli_running = 1;
 
-static int cmd_wifi_set(int argc, char **argv)
+/* Forward declarations of command handlers */
+static int cmd_help(int argc, char **argv);
+#if MIMI_ENABLE_TELEGRAM
+static int cmd_set_tg_token(int argc, char **argv);
+#endif
+static int cmd_set_api_url(int argc, char **argv);
+static int cmd_set_api_key(int argc, char **argv);
+static int cmd_set_model(int argc, char **argv);
+static int cmd_set_model_provider(int argc, char **argv);
+static int cmd_memory_read(int argc, char **argv);
+static int cmd_memory_write(int argc, char **argv);
+static int cmd_session_list(int argc, char **argv);
+static int cmd_session_clear(int argc, char **argv);
+static int cmd_heap_info(int argc, char **argv);
+static int cmd_set_proxy(int argc, char **argv);
+static int cmd_clear_proxy(int argc, char **argv);
+static int cmd_set_search_key(int argc, char **argv);
+static int cmd_config_show(int argc, char **argv);
+static int cmd_config_reset(int argc, char **argv);
+static int cmd_heartbeat_trigger(int argc, char **argv);
+static int cmd_cron_start(int argc, char **argv);
+static int cmd_tool_exec(int argc, char **argv);
+static int cmd_skill_list(int argc, char **argv);
+static int cmd_skill_show(int argc, char **argv);
+static int cmd_skill_search(int argc, char **argv);
+static int cmd_exit(int argc, char **argv);
+
+/* Command table entry */
+typedef struct {
+    const char *name;
+    const char *help;
+    int (*handler)(int argc, char **argv);
+    int min_args;  /* Minimum arguments required (excluding command name) */
+} cli_cmd_t;
+
+/* Command table - sorted alphabetically */
+static const cli_cmd_t g_commands[] = {
+    { "config_reset",       "Clear all NVS overrides, revert to build-time defaults", cmd_config_reset, 0 },
+    { "config_show",        "Show current configuration (build-time + NVS)", cmd_config_show, 0 },
+    { "cron_start",         "Start cron scheduler timer now", cmd_cron_start, 0 },
+    { "exit",               "Exit the CLI (Ctrl+D also works)", cmd_exit, 0 },
+    { "heap_info",          "Show heap memory usage", cmd_heap_info, 0 },
+    { "heartbeat_trigger",  "Manually trigger a heartbeat check", cmd_heartbeat_trigger, 0 },
+    { "help",               "Show this help message", cmd_help, 0 },
+    { "memory_read",        "Read MEMORY.md", cmd_memory_read, 0 },
+    { "memory_write",       "Write to MEMORY.md", cmd_memory_write, 1 },
+    { "session_clear",      "Clear a session", cmd_session_clear, 1 },
+    { "session_list",       "List all sessions", cmd_session_list, 0 },
+    { "set_api_url",        "Set LLM API URL override", cmd_set_api_url, 1 },
+    { "set_api_key",        "Set LLM API key", cmd_set_api_key, 1 },
+    { "set_model",          "Set LLM model (default: " MIMI_LLM_DEFAULT_MODEL ")", cmd_set_model, 1 },
+    { "set_model_provider", "Set LLM model provider (anthropic|openai)", cmd_set_model_provider, 1 },
+    { "set_proxy",          "Set proxy (e.g. set_proxy 192.168.1.83 7897 [http|socks5])", cmd_set_proxy, 2 },
+    { "set_search_key",     "Set Brave Search API key for web_search tool", cmd_set_search_key, 1 },
+#if MIMI_ENABLE_TELEGRAM
+    { "set_tg_token",       "Set Telegram bot token", cmd_set_tg_token, 1 },
+#endif
+    { "skill_list",         "List installed skills from " MIMI_SKILLS_PREFIX, cmd_skill_list, 0 },
+    { "skill_search",       "Search skill files by keyword (filename + content)", cmd_skill_search, 1 },
+    { "skill_show",         "Print full content of one skill file", cmd_skill_show, 1 },
+    { "tool_exec",          "Execute a registered tool: tool_exec <name> '{...json...}'", cmd_tool_exec, 1 },
+    { "clear_proxy",        "Remove proxy configuration", cmd_clear_proxy, 0 },
+};
+static const int g_num_commands = sizeof(g_commands) / sizeof(g_commands[0]);
+
+/* ============== Utility Functions ============== */
+
+/* Trim leading and trailing whitespace in place */
+static char *trim(char *str)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&wifi_set_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, wifi_set_args.end, argv[0]);
-        return 1;
+    if (!str) return NULL;
+
+    /* Leading */
+    while (*str && isspace((unsigned char)*str)) str++;
+
+    if (*str == '\0') return str;
+
+    /* Trailing */
+    char *end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end)) end--;
+    *(end + 1) = '\0';
+
+    return str;
+}
+
+/* Split a line into argc/argv (max 16 args) */
+static int split_args(char *line, char **argv, int max_argv)
+{
+    if (!line || !argv || max_argv < 1) return 0;
+
+    int argc = 0;
+    char *p = line;
+    bool in_quotes = false;
+    char *token_start = NULL;
+
+    while (*p && argc < max_argv - 1) {
+        /* Skip leading whitespace unless in quotes */
+        while (*p && !in_quotes && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+
+        token_start = p;
+        char *write_ptr = p;
+
+        while (*p) {
+            if (*p == '"' && (p == token_start || *(p-1) != '\\')) {
+                in_quotes = !in_quotes;
+                p++;  /* Skip the quote character */
+                continue;
+            }
+            if (!in_quotes && isspace((unsigned char)*p)) {
+                break;
+            }
+            /* Handle escaped characters */
+            if (*p == '\\' && *(p+1)) {
+                p++;
+                *write_ptr++ = *p++;
+            } else {
+                *write_ptr++ = *p++;
+            }
+        }
+
+        *write_ptr = '\0';
+        if (*token_start) {
+            argv[argc++] = token_start;
+        }
+
+        if (*p) p++;  /* Skip the space */
     }
-    wifi_manager_set_credentials(wifi_set_args.ssid->sval[0],
-                                  wifi_set_args.password->sval[0]);
-    printf("WiFi credentials saved. Restart to apply.\n");
-    return 0;
+
+    argv[argc] = NULL;
+    return argc;
 }
 
-/* --- wifi_status command --- */
-static int cmd_wifi_status(int argc, char **argv)
+/* Find command by name */
+static const cli_cmd_t *find_command(const char *name)
 {
-    printf("WiFi connected: %s\n", wifi_manager_is_connected() ? "yes" : "no");
-    printf("IP: %s\n", wifi_manager_get_ip());
+    for (int i = 0; i < g_num_commands; i++) {
+        if (strcmp(g_commands[i].name, name) == 0) {
+            return &g_commands[i];
+        }
+    }
+    return NULL;
+}
+
+/* ============== Command Handlers ============== */
+
+static int cmd_help(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    printf("Available commands:\n");
+    for (int i = 0; i < g_num_commands; i++) {
+        printf("  %-20s %s\n", g_commands[i].name, g_commands[i].help);
+    }
+    printf("\nType 'exit' or Ctrl+D to quit.\n");
     return 0;
 }
 
-/* --- set_tg_token command --- */
-static struct {
-    struct arg_str *token;
-    struct arg_end *end;
-} tg_token_args;
+static int cmd_exit(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    printf("Goodbye!\n");
+    g_cli_running = 0;
+    return 0;
+}
 
+#if MIMI_ENABLE_TELEGRAM
 static int cmd_set_tg_token(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&tg_token_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, tg_token_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: set_tg_token <token>\n");
         return 1;
     }
-    telegram_set_token(tg_token_args.token->sval[0]);
+    telegram_set_token(argv[1]);
     printf("Telegram bot token saved.\n");
     return 0;
 }
+#endif
 
-/* --- set_api_key command --- */
-static struct {
-    struct arg_str *key;
-    struct arg_end *end;
-} api_key_args;
+static int cmd_set_api_url(int argc, char **argv)
+{
+    if (argc < 2) {
+        printf("Usage: set_api_url <url>\n");
+        return 1;
+    }
+    llm_set_api_url(argv[1]);
+    printf("API URL override saved.\n");
+    return 0;
+}
 
 static int cmd_set_api_key(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&api_key_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, api_key_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: set_api_key <key>\n");
         return 1;
     }
-    llm_set_api_key(api_key_args.key->sval[0]);
+    llm_set_api_key(argv[1]);
     printf("API key saved.\n");
     return 0;
 }
 
-/* --- set_model command --- */
-static struct {
-    struct arg_str *model;
-    struct arg_end *end;
-} model_args;
-
 static int cmd_set_model(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&model_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, model_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: set_model <model>\n");
         return 1;
     }
-    llm_set_model(model_args.model->sval[0]);
+    llm_set_model(argv[1]);
     printf("Model set.\n");
     return 0;
 }
 
-/* --- set_model_provider command --- */
-static struct {
-    struct arg_str *provider;
-    struct arg_end *end;
-} provider_args;
-
 static int cmd_set_model_provider(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&provider_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, provider_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: set_model_provider <anthropic|openai>\n");
         return 1;
     }
-    llm_set_provider(provider_args.provider->sval[0]);
+    llm_set_provider(argv[1]);
     printf("Model provider set.\n");
     return 0;
 }
 
-/* --- memory_read command --- */
 static int cmd_memory_read(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
+
     char *buf = malloc(4096);
     if (!buf) {
         printf("Out of memory.\n");
@@ -143,46 +278,33 @@ static int cmd_memory_read(int argc, char **argv)
     return 0;
 }
 
-/* --- memory_write command --- */
-static struct {
-    struct arg_str *content;
-    struct arg_end *end;
-} memory_write_args;
-
 static int cmd_memory_write(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&memory_write_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, memory_write_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: memory_write <content>\n");
         return 1;
     }
-    memory_write_long_term(memory_write_args.content->sval[0]);
+    memory_write_long_term(argv[1]);
     printf("MEMORY.md updated.\n");
     return 0;
 }
 
-/* --- session_list command --- */
 static int cmd_session_list(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     printf("Sessions:\n");
     session_list();
     return 0;
 }
 
-/* --- session_clear command --- */
-static struct {
-    struct arg_str *chat_id;
-    struct arg_end *end;
-} session_clear_args;
-
 static int cmd_session_clear(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&session_clear_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, session_clear_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: session_clear <chat_id>\n");
         return 1;
     }
-    if (session_clear(session_clear_args.chat_id->sval[0]) == ESP_OK) {
+    if (session_clear(argv[1]) == ESP_OK) {
         printf("Session cleared.\n");
     } else {
         printf("Session not found.\n");
@@ -190,9 +312,10 @@ static int cmd_session_clear(int argc, char **argv)
     return 0;
 }
 
-/* --- heap_info command --- */
 static int cmd_heap_info(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     printf("Internal free: %d bytes\n",
            (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     printf("PSRAM free:    %d bytes\n",
@@ -202,71 +325,203 @@ static int cmd_heap_info(int argc, char **argv)
     return 0;
 }
 
-/* --- set_proxy command --- */
-static struct {
-    struct arg_str *host;
-    struct arg_int *port;
-    struct arg_str *type;
-    struct arg_end *end;
-} proxy_args;
-
 static int cmd_set_proxy(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&proxy_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, proxy_args.end, argv[0]);
-        return 1;
-    }
-    const char *proxy_type = "http";
-    if (proxy_args.type->count > 0 && proxy_args.type->sval[0] && proxy_args.type->sval[0][0]) {
-        proxy_type = proxy_args.type->sval[0];
-    }
-    if (strcmp(proxy_type, "http") != 0 && strcmp(proxy_type, "socks5") != 0) {
-        printf("Invalid proxy type: %s. Use http or socks5.\n", proxy_type);
+    if (argc < 3) {
+        printf("Usage: set_proxy <host> <port> [http|socks5]\n");
         return 1;
     }
 
-    http_proxy_set(proxy_args.host->sval[0], (uint16_t)proxy_args.port->ival[0], proxy_type);
+    const char *host = argv[1];
+    int port = atoi(argv[2]);
+    const char *type = (argc >= 4) ? argv[3] : "http";
+
+    if (port <= 0 || port > 65535) {
+        printf("Invalid port number.\n");
+        return 1;
+    }
+
+    if (strcmp(type, "http") != 0 && strcmp(type, "socks5") != 0) {
+        printf("Invalid proxy type: %s. Use http or socks5.\n", type);
+        return 1;
+    }
+
+    http_proxy_set(host, (uint16_t)port, type);
     printf("Proxy set. Restart to apply.\n");
     return 0;
 }
 
-/* --- clear_proxy command --- */
 static int cmd_clear_proxy(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     http_proxy_clear();
     printf("Proxy cleared. Restart to apply.\n");
     return 0;
 }
 
-/* --- set_search_key command --- */
-static struct {
-    struct arg_str *key;
-    struct arg_end *end;
-} search_key_args;
-
 static int cmd_set_search_key(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&search_key_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, search_key_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: set_search_key <key>\n");
         return 1;
     }
-    tool_web_search_set_key(search_key_args.key->sval[0]);
+    tool_web_search_set_key(argv[1]);
     printf("Search API key saved.\n");
     return 0;
 }
 
-/* --- wifi_scan command --- */
-static int cmd_wifi_scan(int argc, char **argv)
+/* config_show helper */
+static void print_config(const char *label, const char *ns, const char *key,
+                         const char *build_val, bool mask)
+{
+    char nvs_val[128] = {0};
+    const char *source = "not set";
+    const char *display = "(empty)";
+
+    /* NVS takes highest priority */
+    nvs_handle_t nvs;
+    if (nvs_open(ns, NVS_READONLY, &nvs) == ESP_OK) {
+        size_t len = sizeof(nvs_val);
+        if (nvs_get_str(nvs, key, nvs_val, &len) == ESP_OK && nvs_val[0]) {
+            source = "NVS";
+            display = nvs_val;
+        }
+        nvs_close(nvs);
+    }
+
+    /* Fall back to build-time value */
+    if (strcmp(source, "not set") == 0 && build_val[0] != '\0') {
+        source = "build";
+        display = build_val;
+    }
+
+    if (mask && strlen(display) > 6 && strcmp(display, "(empty)") != 0) {
+        printf("  %-14s: %.4s****  [%s]\n", label, display, source);
+    } else {
+        printf("  %-14s: %s  [%s]\n", label, display, source);
+    }
+}
+
+static int cmd_config_show(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    wifi_manager_scan_and_print();
+    printf("=== Current Configuration ===\n");
+#if MIMI_ENABLE_TELEGRAM
+    print_config("TG Token",   MIMI_NVS_TG,     MIMI_NVS_KEY_TG_TOKEN, MIMI_SECRET_TG_TOKEN,   true);
+#else
+    printf("  %-14s: disabled  [build]\n", "Telegram");
+#endif
+    print_config("API URL",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_URL,  MIMI_SECRET_API_URL,    false);
+    print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
+    print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
+    print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
+    print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
+    print_config("Proxy Port", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT, false);
+    print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
+    printf("=============================\n");
     return 0;
 }
 
-/* --- skill_list command --- */
+static int cmd_config_reset(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    const char *namespaces[] = {
+#if MIMI_ENABLE_TELEGRAM
+        MIMI_NVS_TG,
+#endif
+        MIMI_NVS_LLM,
+        MIMI_NVS_PROXY,
+        MIMI_NVS_SEARCH
+    };
+    for (size_t i = 0; i < (sizeof(namespaces) / sizeof(namespaces[0])); i++) {
+        nvs_handle_t nvs;
+        if (nvs_open(namespaces[i], NVS_READWRITE, &nvs) == ESP_OK) {
+            nvs_erase_all(nvs);
+            nvs_commit(nvs);
+            nvs_close(nvs);
+        }
+    }
+    printf("All NVS config cleared. Build-time defaults will be used on restart.\n");
+    return 0;
+}
+
+static int cmd_heartbeat_trigger(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    printf("Checking HEARTBEAT.md...\n");
+    if (heartbeat_trigger()) {
+        printf("Heartbeat: agent prompted with pending tasks.\n");
+    } else {
+        printf("Heartbeat: no actionable tasks found.\n");
+    }
+    return 0;
+}
+
+static int cmd_cron_start(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    esp_err_t err = cron_service_start();
+    if (err == ESP_OK) {
+        printf("Cron service started.\n");
+        return 0;
+    }
+
+    printf("Failed to start cron service: %s\n", esp_err_to_name(err));
+    return 1;
+}
+
+static int cmd_tool_exec(int argc, char **argv)
+{
+    if (argc < 2) {
+        printf("Usage: tool_exec <name> [json]\n");
+        return 1;
+    }
+
+    const char *tool_name = argv[1];
+    const char *input_json = (argc >= 3) ? argv[2] : "{}";
+
+    char *output = calloc(1, 4096);
+    if (!output) {
+        printf("Out of memory.\n");
+        return 1;
+    }
+
+    esp_err_t err = tool_registry_execute(tool_name, input_json, output, 4096);
+    printf("tool_exec status: %s\n", esp_err_to_name(err));
+    printf("%s\n", output[0] ? output : "(empty)");
+    free(output);
+    return (err == ESP_OK) ? 0 : 1;
+}
+
+static bool has_md_suffix(const char *name)
+{
+    size_t len = strlen(name);
+    return (len >= 3) && strcmp(name + len - 3, ".md") == 0;
+}
+
+static bool build_skill_path(const char *name, char *out, size_t out_size)
+{
+    if (!name || !name[0]) return false;
+    if (strstr(name, "..") != NULL) return false;
+    if (strchr(name, '/') != NULL || strchr(name, '\\') != NULL) return false;
+
+    char rel_path[128];
+    if (has_md_suffix(name)) {
+        snprintf(rel_path, sizeof(rel_path), "skills/%s", name);
+    } else {
+        snprintf(rel_path, sizeof(rel_path), "skills/%s.md", name);
+    }
+    return mimi_get_full_path(rel_path, out, out_size) == 0;
+}
+
 static int cmd_skill_list(int argc, char **argv)
 {
     (void)argc;
@@ -288,42 +543,15 @@ static int cmd_skill_list(int argc, char **argv)
     return 0;
 }
 
-/* --- skill_show command --- */
-static struct {
-    struct arg_str *name;
-    struct arg_end *end;
-} skill_show_args;
-
-static bool has_md_suffix(const char *name)
-{
-    size_t len = strlen(name);
-    return (len >= 3) && strcmp(name + len - 3, ".md") == 0;
-}
-
-static bool build_skill_path(const char *name, char *out, size_t out_size)
-{
-    if (!name || !name[0]) return false;
-    if (strstr(name, "..") != NULL) return false;
-    if (strchr(name, '/') != NULL || strchr(name, '\\') != NULL) return false;
-
-    if (has_md_suffix(name)) {
-        snprintf(out, out_size, MIMI_SKILLS_PREFIX "%s", name);
-    } else {
-        snprintf(out, out_size, MIMI_SKILLS_PREFIX "%s.md", name);
-    }
-    return true;
-}
-
 static int cmd_skill_show(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&skill_show_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, skill_show_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: skill_show <name>\n");
         return 1;
     }
 
     char path[128];
-    if (!build_skill_path(skill_show_args.name->sval[0], path, sizeof(path))) {
+    if (!build_skill_path(argv[1], path, sizeof(path))) {
         printf("Invalid skill name.\n");
         return 1;
     }
@@ -344,12 +572,6 @@ static int cmd_skill_show(int argc, char **argv)
     return 0;
 }
 
-/* --- skill_search command --- */
-static struct {
-    struct arg_str *keyword;
-    struct arg_end *end;
-} skill_search_args;
-
 static bool contains_nocase(const char *text, const char *keyword)
 {
     if (!text || !keyword || !keyword[0]) return false;
@@ -368,21 +590,24 @@ static bool contains_nocase(const char *text, const char *keyword)
 
 static int cmd_skill_search(int argc, char **argv)
 {
-    int nerrors = arg_parse(argc, argv, (void **)&skill_search_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, skill_search_args.end, argv[0]);
+    if (argc < 2) {
+        printf("Usage: skill_search <keyword>\n");
         return 1;
     }
 
-    const char *keyword = skill_search_args.keyword->sval[0];
-    DIR *dir = opendir(MIMI_SPIFFS_BASE);
+    const char *keyword = argv[1];
+    char skills_dir[256];
+    if (mimi_get_full_path("skills", skills_dir, sizeof(skills_dir)) != 0) {
+        printf("Cannot resolve skills directory.\n");
+        return 1;
+    }
+
+    DIR *dir = opendir(skills_dir);
     if (!dir) {
-        printf("Cannot open " MIMI_SPIFFS_BASE ".\n");
+        printf("Cannot open %s.\n", skills_dir);
         return 1;
     }
 
-    const char *prefix = "skills/";
-    const size_t prefix_len = strlen(prefix);
     int matches = 0;
 
     struct dirent *ent;
@@ -390,12 +615,11 @@ static int cmd_skill_search(int argc, char **argv)
         const char *name = ent->d_name;
         size_t name_len = strlen(name);
 
-        if (strncmp(name, prefix, prefix_len) != 0) continue;
-        if (name_len < prefix_len + 4) continue;
+        if (name_len < 4) continue;
         if (strcmp(name + name_len - 3, ".md") != 0) continue;
 
         char full_path[296];
-        snprintf(full_path, sizeof(full_path), MIMI_SPIFFS_BASE "/%s", name);
+        snprintf(full_path, sizeof(full_path), "%s/%s", skills_dir, name);
 
         bool file_matched = contains_nocase(name, keyword);
         int matched_line = 0;
@@ -433,384 +657,66 @@ static int cmd_skill_search(int argc, char **argv)
     return 0;
 }
 
-/* --- config_show command --- */
-static void print_config(const char *label, const char *ns, const char *key,
-                         const char *build_val, bool mask)
-{
-    char nvs_val[128] = {0};
-    const char *source = "not set";
-    const char *display = "(empty)";
-
-    /* NVS takes highest priority */
-    nvs_handle_t nvs;
-    if (nvs_open(ns, NVS_READONLY, &nvs) == ESP_OK) {
-        size_t len = sizeof(nvs_val);
-        if (nvs_get_str(nvs, key, nvs_val, &len) == ESP_OK && nvs_val[0]) {
-            source = "NVS";
-            display = nvs_val;
-        }
-        nvs_close(nvs);
-    }
-
-    /* Fall back to build-time value */
-    if (strcmp(source, "not set") == 0 && build_val[0] != '\0') {
-        source = "build";
-        display = build_val;
-    }
-
-    if (mask && strlen(display) > 6 && strcmp(display, "(empty)") != 0) {
-        printf("  %-14s: %.4s****  [%s]\n", label, display, source);
-    } else {
-        printf("  %-14s: %s  [%s]\n", label, display, source);
-    }
-}
-
-static int cmd_config_show(int argc, char **argv)
-{
-    printf("=== Current Configuration ===\n");
-    print_config("WiFi SSID",  MIMI_NVS_WIFI,   MIMI_NVS_KEY_SSID,     MIMI_SECRET_WIFI_SSID,  false);
-    print_config("WiFi Pass",  MIMI_NVS_WIFI,   MIMI_NVS_KEY_PASS,     MIMI_SECRET_WIFI_PASS,  true);
-    print_config("TG Token",   MIMI_NVS_TG,     MIMI_NVS_KEY_TG_TOKEN, MIMI_SECRET_TG_TOKEN,   true);
-    print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
-    print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
-    print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
-    print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
-    print_config("Proxy Port", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT, false);
-    print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
-    printf("=============================\n");
-    return 0;
-}
-
-/* --- config_reset command --- */
-static int cmd_config_reset(int argc, char **argv)
-{
-    const char *namespaces[] = {
-        MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH
-    };
-    for (int i = 0; i < 5; i++) {
-        nvs_handle_t nvs;
-        if (nvs_open(namespaces[i], NVS_READWRITE, &nvs) == ESP_OK) {
-            nvs_erase_all(nvs);
-            nvs_commit(nvs);
-            nvs_close(nvs);
-        }
-    }
-    printf("All NVS config cleared. Build-time defaults will be used on restart.\n");
-    return 0;
-}
-
-/* --- heartbeat_trigger command --- */
-static int cmd_heartbeat_trigger(int argc, char **argv)
-{
-    printf("Checking HEARTBEAT.md...\n");
-    if (heartbeat_trigger()) {
-        printf("Heartbeat: agent prompted with pending tasks.\n");
-    } else {
-        printf("Heartbeat: no actionable tasks found.\n");
-    }
-    return 0;
-}
-
-/* --- cron_start command --- */
-static int cmd_cron_start(int argc, char **argv)
-{
-    esp_err_t err = cron_service_start();
-    if (err == ESP_OK) {
-        printf("Cron service started.\n");
-        return 0;
-    }
-
-    printf("Failed to start cron service: %s\n", esp_err_to_name(err));
-    return 1;
-}
-
-static int cmd_tool_exec(int argc, char **argv)
-{
-    if (argc < 2) {
-        printf("Usage: tool_exec <name> [json]\n");
-        return 1;
-    }
-
-    const char *tool_name = argv[1];
-    const char *input_json = (argc >= 3) ? argv[2] : "{}";
-
-    char *output = calloc(1, 4096);
-    if (!output) {
-        printf("Out of memory.\n");
-        return 1;
-    }
-
-    esp_err_t err = tool_registry_execute(tool_name, input_json, output, 4096);
-    printf("tool_exec status: %s\n", esp_err_to_name(err));
-    printf("%s\n", output[0] ? output : "(empty)");
-    free(output);
-    return (err == ESP_OK) ? 0 : 1;
-}
-
-/* --- restart command --- */
-static int cmd_restart(int argc, char **argv)
-{
-    printf("Restarting...\n");
-    esp_restart();
-    return 0;  /* unreachable */
-}
+/* ============== Public API ============== */
 
 esp_err_t serial_cli_init(void)
 {
-    esp_console_repl_t *repl = NULL;
-    esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    repl_config.prompt = "mimi> ";
-    repl_config.max_cmdline_length = 256;
-
-#if CONFIG_ESP_CONSOLE_UART_DEFAULT || CONFIG_ESP_CONSOLE_UART_CUSTOM
-    esp_console_dev_uart_config_t hw_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_uart(&hw_config, &repl_config, &repl));
-#elif CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
-    esp_console_dev_usb_serial_jtag_config_t hw_config =
-        ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw_config, &repl_config, &repl));
-#elif CONFIG_ESP_CONSOLE_USB_CDC
-    esp_console_dev_usb_cdc_config_t hw_config = ESP_CONSOLE_DEV_CDC_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_usb_cdc(&hw_config, &repl_config, &repl));
-#else
-    ESP_LOGE(TAG, "No supported console backend is enabled");
-    return ESP_ERR_NOT_SUPPORTED;
-#endif
-
-    /* Register commands */
-    esp_console_register_help_command();
-
-    /* set_wifi */
-    wifi_set_args.ssid = arg_str1(NULL, NULL, "<ssid>", "WiFi SSID");
-    wifi_set_args.password = arg_str1(NULL, NULL, "<password>", "WiFi password");
-    wifi_set_args.end = arg_end(2);
-    esp_console_cmd_t wifi_set_cmd = {
-        .command = "set_wifi",
-        .help = "Set WiFi SSID and password (e.g. set_wifi MySSID MyPass)",
-        .func = &cmd_wifi_set,
-        .argtable = &wifi_set_args,
-    };
-    esp_console_cmd_register(&wifi_set_cmd);
-
-    /* wifi_status */
-    esp_console_cmd_t wifi_status_cmd = {
-        .command = "wifi_status",
-        .help = "Show WiFi connection status",
-        .func = &cmd_wifi_status,
-    };
-    esp_console_cmd_register(&wifi_status_cmd);
-
-    /* wifi_scan */
-    esp_console_cmd_t wifi_scan_cmd = {
-        .command = "wifi_scan",
-        .help = "Scan and list nearby WiFi APs",
-        .func = &cmd_wifi_scan,
-    };
-    esp_console_cmd_register(&wifi_scan_cmd);
-
-    /* set_tg_token */
-    tg_token_args.token = arg_str1(NULL, NULL, "<token>", "Telegram bot token");
-    tg_token_args.end = arg_end(1);
-    esp_console_cmd_t tg_token_cmd = {
-        .command = "set_tg_token",
-        .help = "Set Telegram bot token",
-        .func = &cmd_set_tg_token,
-        .argtable = &tg_token_args,
-    };
-    esp_console_cmd_register(&tg_token_cmd);
-
-    /* set_api_key */
-    api_key_args.key = arg_str1(NULL, NULL, "<key>", "LLM API key");
-    api_key_args.end = arg_end(1);
-    esp_console_cmd_t api_key_cmd = {
-        .command = "set_api_key",
-        .help = "Set LLM API key",
-        .func = &cmd_set_api_key,
-        .argtable = &api_key_args,
-    };
-    esp_console_cmd_register(&api_key_cmd);
-
-    /* set_model */
-    model_args.model = arg_str1(NULL, NULL, "<model>", "Model identifier");
-    model_args.end = arg_end(1);
-    esp_console_cmd_t model_cmd = {
-        .command = "set_model",
-        .help = "Set LLM model (default: " MIMI_LLM_DEFAULT_MODEL ")",
-        .func = &cmd_set_model,
-        .argtable = &model_args,
-    };
-    esp_console_cmd_register(&model_cmd);
-
-    /* set_model_provider */
-    provider_args.provider = arg_str1(NULL, NULL, "<provider>", "Model provider (anthropic|openai)");
-    provider_args.end = arg_end(1);
-    esp_console_cmd_t provider_cmd = {
-        .command = "set_model_provider",
-        .help = "Set LLM model provider (default: " MIMI_LLM_PROVIDER_DEFAULT ")",
-        .func = &cmd_set_model_provider,
-        .argtable = &provider_args,
-    };
-    esp_console_cmd_register(&provider_cmd);
-
-    /* skill_list */
-    esp_console_cmd_t skill_list_cmd = {
-        .command = "skill_list",
-        .help = "List installed skills from " MIMI_SKILLS_PREFIX,
-        .func = &cmd_skill_list,
-    };
-    esp_console_cmd_register(&skill_list_cmd);
-
-    /* skill_show */
-    skill_show_args.name = arg_str1(NULL, NULL, "<name>", "Skill name (e.g. weather or weather.md)");
-    skill_show_args.end = arg_end(1);
-    esp_console_cmd_t skill_show_cmd = {
-        .command = "skill_show",
-        .help = "Print full content of one skill file",
-        .func = &cmd_skill_show,
-        .argtable = &skill_show_args,
-    };
-    esp_console_cmd_register(&skill_show_cmd);
-
-    /* skill_search */
-    skill_search_args.keyword = arg_str1(NULL, NULL, "<keyword>", "Keyword to search in skills");
-    skill_search_args.end = arg_end(1);
-    esp_console_cmd_t skill_search_cmd = {
-        .command = "skill_search",
-        .help = "Search skill files by keyword (filename + content)",
-        .func = &cmd_skill_search,
-        .argtable = &skill_search_args,
-    };
-    esp_console_cmd_register(&skill_search_cmd);
-
-    /* memory_read */
-    esp_console_cmd_t mem_read_cmd = {
-        .command = "memory_read",
-        .help = "Read MEMORY.md",
-        .func = &cmd_memory_read,
-    };
-    esp_console_cmd_register(&mem_read_cmd);
-
-    /* memory_write */
-    memory_write_args.content = arg_str1(NULL, NULL, "<content>", "Content to write");
-    memory_write_args.end = arg_end(1);
-    esp_console_cmd_t mem_write_cmd = {
-        .command = "memory_write",
-        .help = "Write to MEMORY.md",
-        .func = &cmd_memory_write,
-        .argtable = &memory_write_args,
-    };
-    esp_console_cmd_register(&mem_write_cmd);
-
-    /* session_list */
-    esp_console_cmd_t sess_list_cmd = {
-        .command = "session_list",
-        .help = "List all sessions",
-        .func = &cmd_session_list,
-    };
-    esp_console_cmd_register(&sess_list_cmd);
-
-    /* session_clear */
-    session_clear_args.chat_id = arg_str1(NULL, NULL, "<chat_id>", "Chat ID to clear");
-    session_clear_args.end = arg_end(1);
-    esp_console_cmd_t sess_clear_cmd = {
-        .command = "session_clear",
-        .help = "Clear a session",
-        .func = &cmd_session_clear,
-        .argtable = &session_clear_args,
-    };
-    esp_console_cmd_register(&sess_clear_cmd);
-
-    /* heap_info */
-    esp_console_cmd_t heap_cmd = {
-        .command = "heap_info",
-        .help = "Show heap memory usage",
-        .func = &cmd_heap_info,
-    };
-    esp_console_cmd_register(&heap_cmd);
-
-    /* set_search_key */
-    search_key_args.key = arg_str1(NULL, NULL, "<key>", "Brave Search API key");
-    search_key_args.end = arg_end(1);
-    esp_console_cmd_t search_key_cmd = {
-        .command = "set_search_key",
-        .help = "Set Brave Search API key for web_search tool",
-        .func = &cmd_set_search_key,
-        .argtable = &search_key_args,
-    };
-    esp_console_cmd_register(&search_key_cmd);
-
-    /* set_proxy */
-    proxy_args.host = arg_str1(NULL, NULL, "<host>", "Proxy host/IP");
-    proxy_args.port = arg_int1(NULL, NULL, "<port>", "Proxy port");
-    proxy_args.type = arg_str0(NULL, NULL, "<type>", "Proxy type: http|socks5 (default: http)");
-    proxy_args.end = arg_end(3);
-    esp_console_cmd_t proxy_cmd = {
-        .command = "set_proxy",
-        .help = "Set proxy (e.g. set_proxy 192.168.1.83 7897 [http|socks5])",
-        .func = &cmd_set_proxy,
-        .argtable = &proxy_args,
-    };
-    esp_console_cmd_register(&proxy_cmd);
-
-    /* clear_proxy */
-    esp_console_cmd_t clear_proxy_cmd = {
-        .command = "clear_proxy",
-        .help = "Remove proxy configuration",
-        .func = &cmd_clear_proxy,
-    };
-    esp_console_cmd_register(&clear_proxy_cmd);
-
-    /* config_show */
-    esp_console_cmd_t config_show_cmd = {
-        .command = "config_show",
-        .help = "Show current configuration (build-time + NVS)",
-        .func = &cmd_config_show,
-    };
-    esp_console_cmd_register(&config_show_cmd);
-
-    /* config_reset */
-    esp_console_cmd_t config_reset_cmd = {
-        .command = "config_reset",
-        .help = "Clear all NVS overrides, revert to build-time defaults",
-        .func = &cmd_config_reset,
-    };
-    esp_console_cmd_register(&config_reset_cmd);
-
-    /* heartbeat_trigger */
-    esp_console_cmd_t heartbeat_cmd = {
-        .command = "heartbeat_trigger",
-        .help = "Manually trigger a heartbeat check",
-        .func = &cmd_heartbeat_trigger,
-    };
-    esp_console_cmd_register(&heartbeat_cmd);
-
-    /* cron_start */
-    esp_console_cmd_t cron_start_cmd = {
-        .command = "cron_start",
-        .help = "Start cron scheduler timer now",
-        .func = &cmd_cron_start,
-    };
-    esp_console_cmd_register(&cron_start_cmd);
-
-    /* tool_exec */
-    esp_console_cmd_t tool_exec_cmd = {
-        .command = "tool_exec",
-        .help = "Execute a registered tool: tool_exec <name> '{...json...}'",
-        .func = &cmd_tool_exec,
-    };
-    esp_console_cmd_register(&tool_exec_cmd);
-
-    /* restart */
-    esp_console_cmd_t restart_cmd = {
-        .command = "restart",
-        .help = "Restart the device",
-        .func = &cmd_restart,
-    };
-    esp_console_cmd_register(&restart_cmd);
-
-    /* Start REPL */
-    ESP_ERROR_CHECK(esp_console_start_repl(repl));
     ESP_LOGI(TAG, "Serial CLI started");
-
     return ESP_OK;
+}
+
+int serial_cli_run(void)
+{
+    char *line = NULL;
+    size_t cap = 0;
+
+    while (g_cli_running) {
+        fputs("mimi> ", stdout);
+        fflush(stdout);
+
+        ssize_t line_len = getline(&line, &cap, stdin);
+        if (line_len < 0) {
+            break;
+        }
+        if (line_len > 0 && line[line_len - 1] == '\n') {
+            line[line_len - 1] = '\0';
+        }
+
+        char *trimmed = trim(line);
+
+        if (trimmed && *trimmed) {
+            /* Parse and execute */
+            char *argv[16];
+            int argc = split_args(line, argv, 16);
+
+            if (argc > 0) {
+                const cli_cmd_t *cmd = find_command(argv[0]);
+                if (cmd) {
+                    if (argc - 1 >= cmd->min_args) {
+                        cmd->handler(argc, argv);
+                    } else {
+                        printf("Error: %s requires %d argument(s)\n", cmd->name, cmd->min_args);
+                        printf("Usage: %s\n", cmd->help);
+                    }
+                } else {
+                    printf("Unknown command: %s. Type 'help' for available commands.\n", argv[0]);
+                }
+            }
+        }
+
+    }
+
+    /* getline returned NULL (EOF) or exit command was called */
+    if (g_cli_running) {
+        printf("\n");  /* newline after Ctrl+D */
+    }
+
+    free(line);
+    return 0;
+}
+
+/* Signal handler for graceful shutdown */
+void serial_cli_stop(void)
+{
+    g_cli_running = 0;
 }

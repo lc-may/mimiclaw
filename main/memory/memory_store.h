@@ -1,10 +1,10 @@
 #pragma once
 
-#include "esp_err.h"
+#include "linux/linux_compat.h"
 #include <stddef.h>
 
 /**
- * Initialize memory store. Ensures SPIFFS directories exist.
+ * Initialize memory store. Ensures data directories exist (~/.mimiclaw/memory/).
  */
 esp_err_t memory_store_init(void);
 

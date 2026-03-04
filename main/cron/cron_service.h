@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esp_err.h"
+#include "linux/linux_compat.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -27,12 +27,12 @@ typedef struct {
 } cron_job_t;
 
 /**
- * Initialize the cron service. Loads jobs from SPIFFS.
+ * Initialize the cron service. Loads jobs from disk.
  */
 esp_err_t cron_service_init(void);
 
 /**
- * Start the cron timer. Call after WiFi is connected and time is synced.
+ * Start the cron timer.
  */
 esp_err_t cron_service_start(void);
 

@@ -7,14 +7,14 @@
 #include "mimi_secrets.h"
 #endif
 
-#ifndef MIMI_SECRET_WIFI_SSID
-#define MIMI_SECRET_WIFI_SSID       ""
-#endif
-#ifndef MIMI_SECRET_WIFI_PASS
-#define MIMI_SECRET_WIFI_PASS       ""
+#ifndef MIMI_ENABLE_TELEGRAM
+#define MIMI_ENABLE_TELEGRAM        0
 #endif
 #ifndef MIMI_SECRET_TG_TOKEN
 #define MIMI_SECRET_TG_TOKEN        ""
+#endif
+#ifndef MIMI_SECRET_API_URL
+#define MIMI_SECRET_API_URL         ""
 #endif
 #ifndef MIMI_SECRET_API_KEY
 #define MIMI_SECRET_API_KEY         ""
@@ -37,11 +37,6 @@
 #ifndef MIMI_SECRET_SEARCH_KEY
 #define MIMI_SECRET_SEARCH_KEY      ""
 #endif
-
-/* WiFi */
-#define MIMI_WIFI_MAX_RETRY          10
-#define MIMI_WIFI_RETRY_BASE_MS      1000
-#define MIMI_WIFI_RETRY_MAX_MS       30000
 
 /* Telegram Bot */
 #define MIMI_TG_POLL_TIMEOUT_S       30
@@ -81,26 +76,26 @@
 #define MIMI_OUTBOUND_PRIO           5
 #define MIMI_OUTBOUND_CORE           0
 
-/* Memory / SPIFFS */
-#define MIMI_SPIFFS_BASE             "/spiffs"
-#define MIMI_SPIFFS_CONFIG_DIR       MIMI_SPIFFS_BASE "/config"
-#define MIMI_SPIFFS_MEMORY_DIR       MIMI_SPIFFS_BASE "/memory"
-#define MIMI_SPIFFS_SESSION_DIR      MIMI_SPIFFS_BASE "/sessions"
-#define MIMI_MEMORY_FILE             MIMI_SPIFFS_MEMORY_DIR "/MEMORY.md"
-#define MIMI_SOUL_FILE               MIMI_SPIFFS_CONFIG_DIR "/SOUL.md"
-#define MIMI_USER_FILE               MIMI_SPIFFS_CONFIG_DIR "/USER.md"
+#define MIMI_DATA_HOME               "~/.mimiclaw"
+#define MIMI_DATA_BASE               ".mimiclaw"
+#define MIMI_CONFIG_DIR              MIMI_DATA_BASE "/config"
+#define MIMI_MEMORY_DIR              MIMI_DATA_BASE "/memory"
+#define MIMI_SESSION_DIR             MIMI_DATA_BASE "/sessions"
+#define MIMI_MEMORY_FILE             MIMI_DATA_BASE "/memory/MEMORY.md"
+#define MIMI_SOUL_FILE               MIMI_DATA_BASE "/config/SOUL.md"
+#define MIMI_USER_FILE               MIMI_DATA_BASE "/config/USER.md"
 #define MIMI_CONTEXT_BUF_SIZE        (16 * 1024)
 #define MIMI_SESSION_MAX_MSGS        20
 
 /* Cron / Heartbeat */
-#define MIMI_CRON_FILE               MIMI_SPIFFS_BASE "/cron.json"
+#define MIMI_CRON_FILE               MIMI_DATA_BASE "/cron.json"
 #define MIMI_CRON_MAX_JOBS           16
 #define MIMI_CRON_CHECK_INTERVAL_MS  (60 * 1000)
-#define MIMI_HEARTBEAT_FILE          MIMI_SPIFFS_BASE "/HEARTBEAT.md"
+#define MIMI_HEARTBEAT_FILE          MIMI_DATA_BASE "/HEARTBEAT.md"
 #define MIMI_HEARTBEAT_INTERVAL_MS   (30 * 60 * 1000)
 
 /* Skills */
-#define MIMI_SKILLS_PREFIX           MIMI_SPIFFS_BASE "/skills/"
+#define MIMI_SKILLS_PREFIX           MIMI_DATA_BASE "/skills/"
 
 /* WebSocket Gateway */
 #define MIMI_WS_PORT                 18789
@@ -112,16 +107,14 @@
 #define MIMI_CLI_CORE                0
 
 /* NVS Namespaces */
-#define MIMI_NVS_WIFI                "wifi_config"
 #define MIMI_NVS_TG                  "tg_config"
 #define MIMI_NVS_LLM                 "llm_config"
 #define MIMI_NVS_PROXY               "proxy_config"
 #define MIMI_NVS_SEARCH              "search_config"
 
 /* NVS Keys */
-#define MIMI_NVS_KEY_SSID            "ssid"
-#define MIMI_NVS_KEY_PASS            "password"
 #define MIMI_NVS_KEY_TG_TOKEN        "bot_token"
+#define MIMI_NVS_KEY_API_URL         "api_url"
 #define MIMI_NVS_KEY_API_KEY         "api_key"
 #define MIMI_NVS_KEY_MODEL           "model"
 #define MIMI_NVS_KEY_PROVIDER        "provider"

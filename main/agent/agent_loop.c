@@ -8,10 +8,7 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
-#include "esp_heap_caps.h"
+#include "linux/linux_compat.h"
 #include "cJSON.h"
 
 static const char *TAG = "agent";
@@ -170,7 +167,7 @@ static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *m
 
 static void agent_loop_task(void *arg)
 {
-    ESP_LOGI(TAG, "Agent loop started on core %d", xPortGetCoreID());
+    ESP_LOGI(TAG, "Agent loop started");
 
     /* Allocate large buffers from PSRAM */
     char *system_prompt = heap_caps_calloc(1, MIMI_CONTEXT_BUF_SIZE, MALLOC_CAP_SPIRAM);
@@ -179,7 +176,6 @@ static void agent_loop_task(void *arg)
 
     if (!system_prompt || !history_json || !tool_output) {
         ESP_LOGE(TAG, "Failed to allocate PSRAM buffers");
-        vTaskDelete(NULL);
         return;
     }
 
@@ -302,10 +298,15 @@ static void agent_loop_task(void *arg)
         } else {
             /* Error or empty response */
             free(final_text);
+            const char *llm_error = llm_get_last_error();
             mimi_msg_t out = {0};
             strncpy(out.channel, msg.channel, sizeof(out.channel) - 1);
             strncpy(out.chat_id, msg.chat_id, sizeof(out.chat_id) - 1);
-            out.content = strdup("Sorry, I encountered an error.");
+            if (llm_error && llm_error[0]) {
+                out.content = strdup(llm_error);
+            } else {
+                out.content = strdup("Sorry, I encountered an error.");
+            }
             if (out.content) {
                 if (message_bus_push_outbound(&out) != ESP_OK) {
                     ESP_LOGW(TAG, "Outbound queue full, drop error response");
@@ -321,6 +322,7 @@ static void agent_loop_task(void *arg)
         ESP_LOGI(TAG, "Free PSRAM: %d bytes",
                  (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     }
+
 }
 
 esp_err_t agent_loop_init(void)

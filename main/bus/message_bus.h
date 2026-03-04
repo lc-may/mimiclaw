@@ -1,8 +1,6 @@
 #pragma once
 
-#include "esp_err.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
+#include "linux/linux_compat.h"
 
 /* Channel identifiers */
 #define MIMI_CHAN_TELEGRAM   "telegram"

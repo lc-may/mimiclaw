@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esp_err.h"
+#include "linux/linux_compat.h"
 
 /**
  * Initialize the agent loop.

@@ -2,13 +2,11 @@
 #include "mimi_config.h"
 #include "proxy/http_proxy.h"
 
+#include "linux/linux_compat.h"
+#include "linux/linux_http.h"
+
 #include <string.h>
 #include <stdlib.h>
-#include "esp_log.h"
-#include "esp_http_client.h"
-#include "esp_crt_bundle.h"
-#include "esp_heap_caps.h"
-#include "nvs.h"
 #include "cJSON.h"
 
 static const char *TAG = "web_search";
@@ -130,7 +128,7 @@ static void format_results(cJSON *root, char *output, size_t output_size)
     }
 }
 
-/* ── Direct HTTPS request ─────────────────────────────────────── */
+/* ── Direct HTTPS request (libcurl on Linux) ─────────────────────────────── */
 
 static esp_err_t search_direct(const char *url, search_buf_t *sb)
 {
@@ -140,7 +138,6 @@ static esp_err_t search_direct(const char *url, search_buf_t *sb)
         .user_data = sb,
         .timeout_ms = 15000,
         .buffer_size = 4096,
-        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -256,7 +253,7 @@ esp_err_t tool_web_search_execute(const char *input_json, char *output, size_t o
     snprintf(path, sizeof(path),
              "/res/v1/web/search?q=%s&count=%d", encoded_query, SEARCH_RESULT_COUNT);
 
-    /* Allocate response buffer from PSRAM */
+    /* Allocate response buffer from PSRAM (or regular heap on Linux) */
     search_buf_t sb = {0};
     sb.data = heap_caps_calloc(1, SEARCH_BUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!sb.data) {

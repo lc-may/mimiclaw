@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esp_err.h"
+#include "linux/linux_compat.h"
 #include "cJSON.h"
 #include <stddef.h>
 #include <stdbool.h>
@@ -11,6 +11,17 @@
  * Initialize the LLM proxy. Reads API key and model from build-time secrets, then NVS.
  */
 esp_err_t llm_proxy_init(void);
+
+/**
+ * Return the most recent human-readable LLM error, or NULL if none is recorded.
+ */
+const char *llm_get_last_error(void);
+
+/**
+ * Save the LLM API URL override to NVS.
+ * Empty string clears the override and falls back to provider defaults.
+ */
+esp_err_t llm_set_api_url(const char *api_url);
 
 /**
  * Save the LLM API key to NVS.

@@ -1,9 +1,22 @@
 #pragma once
 
-#include "esp_err.h"
+#include "linux/linux_compat.h"
 
 /**
- * Initialize and start the serial CLI (esp_console based).
- * Registers all commands and starts the REPL on USB-JTAG serial.
+ * Initialize the serial CLI.
  */
 esp_err_t serial_cli_init(void);
+
+/**
+ * Run the CLI main loop.
+ * Blocks until 'exit' command or Ctrl+D is received.
+ *
+ * @return 0 on normal exit
+ */
+int serial_cli_run(void);
+
+/**
+ * Signal the CLI to stop.
+ * Called from signal handlers for graceful shutdown.
+ */
+void serial_cli_stop(void);

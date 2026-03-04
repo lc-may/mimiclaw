@@ -1,30 +1,39 @@
 #include "session_mgr.h"
 #include "mimi_config.h"
 
+#include "linux/linux_compat.h"
+#include "linux/linux_paths.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <dirent.h>
 #include <time.h>
-#include "esp_log.h"
 #include "cJSON.h"
 
 static const char *TAG = "session";
 
 static void session_path(const char *chat_id, char *buf, size_t size)
 {
-    snprintf(buf, size, "%s/tg_%s.jsonl", MIMI_SPIFFS_SESSION_DIR, chat_id);
+    char rel_path[64];
+    snprintf(rel_path, sizeof(rel_path), "sessions/tg_%s.jsonl", chat_id);
+    mimi_get_full_path(rel_path, buf, size);
 }
 
 esp_err_t session_mgr_init(void)
 {
-    ESP_LOGI(TAG, "Session manager initialized at %s", MIMI_SPIFFS_SESSION_DIR);
+    /* Ensure data directories exist on Linux */
+    mimi_ensure_data_dirs();
+
+    char session_dir[256];
+    mimi_get_full_path("sessions/", session_dir, sizeof(session_dir));
+    ESP_LOGI(TAG, "Session manager initialized at %s", session_dir);
     return ESP_OK;
 }
 
 esp_err_t session_append(const char *chat_id, const char *role, const char *content)
 {
-    char path[64];
+    char path[256];
     session_path(chat_id, path, sizeof(path));
 
     FILE *f = fopen(path, "a");
@@ -52,7 +61,7 @@ esp_err_t session_append(const char *chat_id, const char *role, const char *cont
 
 esp_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, int max_msgs)
 {
-    char path[64];
+    char path[256];
     session_path(chat_id, path, sizeof(path));
 
     FILE *f = fopen(path, "r");
@@ -127,7 +136,7 @@ esp_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, 
 
 esp_err_t session_clear(const char *chat_id)
 {
-    char path[64];
+    char path[256];
     session_path(chat_id, path, sizeof(path));
 
     if (remove(path) == 0) {
@@ -139,14 +148,13 @@ esp_err_t session_clear(const char *chat_id)
 
 void session_list(void)
 {
-    DIR *dir = opendir(MIMI_SPIFFS_SESSION_DIR);
+    char session_dir[256];
+    mimi_get_full_path("sessions/", session_dir, sizeof(session_dir));
+
+    DIR *dir = opendir(session_dir);
     if (!dir) {
-        /* SPIFFS is flat, so list all files matching pattern */
-        dir = opendir(MIMI_SPIFFS_BASE);
-        if (!dir) {
-            ESP_LOGW(TAG, "Cannot open SPIFFS directory");
-            return;
-        }
+        ESP_LOGW(TAG, "Cannot open sessions directory");
+        return;
     }
 
     struct dirent *entry;

@@ -6,7 +6,7 @@
 #include "tools/tool_cron.h"
 
 #include <string.h>
-#include "esp_log.h"
+#include "linux/linux_compat.h"
 #include "cJSON.h"
 
 static const char *TAG = "tools";
@@ -84,10 +84,10 @@ esp_err_t tool_registry_init(void)
     /* Register read_file */
     mimi_tool_t rf = {
         .name = "read_file",
-        .description = "Read a file from SPIFFS storage. Path must start with " MIMI_SPIFFS_BASE "/.",
+        .description = "Read a file from local data storage. Path must start with " MIMI_DATA_HOME "/.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_SPIFFS_BASE "/\"}},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_DATA_HOME "/\"}},"
             "\"required\":[\"path\"]}",
         .execute = tool_read_file_execute,
     };
@@ -96,10 +96,10 @@ esp_err_t tool_registry_init(void)
     /* Register write_file */
     mimi_tool_t wf = {
         .name = "write_file",
-        .description = "Write or overwrite a file on SPIFFS storage. Path must start with " MIMI_SPIFFS_BASE "/.",
+        .description = "Write or overwrite a file in local data storage. Path must start with " MIMI_DATA_HOME "/.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_SPIFFS_BASE "/\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_DATA_HOME "/\"},"
             "\"content\":{\"type\":\"string\",\"description\":\"File content to write\"}},"
             "\"required\":[\"path\",\"content\"]}",
         .execute = tool_write_file_execute,
@@ -109,10 +109,10 @@ esp_err_t tool_registry_init(void)
     /* Register edit_file */
     mimi_tool_t ef = {
         .name = "edit_file",
-        .description = "Find and replace text in a file on SPIFFS. Replaces first occurrence of old_string with new_string.",
+        .description = "Find and replace text in a local data file. Replaces first occurrence of old_string with new_string.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_SPIFFS_BASE "/\"},"
+            "\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Absolute path starting with " MIMI_DATA_HOME "/\"},"
             "\"old_string\":{\"type\":\"string\",\"description\":\"Text to find\"},"
             "\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"}},"
             "\"required\":[\"path\",\"old_string\",\"new_string\"]}",
@@ -123,10 +123,10 @@ esp_err_t tool_registry_init(void)
     /* Register list_dir */
     mimi_tool_t ld = {
         .name = "list_dir",
-        .description = "List files on SPIFFS storage, optionally filtered by path prefix.",
+        .description = "List files in local data storage, optionally filtered by path prefix.",
         .input_schema_json =
             "{\"type\":\"object\","
-            "\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter, e.g. " MIMI_SPIFFS_BASE "/memory/\"}},"
+            "\"properties\":{\"prefix\":{\"type\":\"string\",\"description\":\"Optional path prefix filter, e.g. " MIMI_DATA_HOME "/memory/\"}},"
             "\"required\":[]}",
         .execute = tool_list_dir_execute,
     };

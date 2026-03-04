@@ -6,10 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
-#include "esp_random.h"
+#include "linux/linux_compat.h"
+#include "linux/linux_paths.h"
 #include "cJSON.h"
 
 static const char *TAG = "cron";
@@ -18,7 +16,7 @@ static const char *TAG = "cron";
 
 static cron_job_t s_jobs[MAX_CRON_JOBS];
 static int s_job_count = 0;
-static TaskHandle_t s_cron_task = NULL;
+static TaskHandle_t s_cron_task = 0;
 
 static esp_err_t cron_save_jobs(void);
 
@@ -60,7 +58,12 @@ static void cron_generate_id(char *id_buf)
 
 static esp_err_t cron_load_jobs(void)
 {
-    FILE *f = fopen(MIMI_CRON_FILE, "r");
+    char path[256];
+    if (mimi_get_full_path(MIMI_PATH_CRON, path, sizeof(path)) != 0) {
+        return ESP_FAIL;
+    }
+
+    FILE *f = fopen(path, "r");
     if (!f) {
         ESP_LOGI(TAG, "No cron file found, starting fresh");
         s_job_count = 0;
@@ -215,9 +218,15 @@ static esp_err_t cron_save_jobs(void)
         return ESP_ERR_NO_MEM;
     }
 
-    FILE *f = fopen(MIMI_CRON_FILE, "w");
+    char path[256];
+    if (mimi_get_full_path(MIMI_PATH_CRON, path, sizeof(path)) != 0) {
+        free(json_str);
+        return ESP_FAIL;
+    }
+
+    FILE *f = fopen(path, "w");
     if (!f) {
-        ESP_LOGE(TAG, "Failed to open %s for writing", MIMI_CRON_FILE);
+        ESP_LOGE(TAG, "Failed to open %s for writing", path);
         free(json_str);
         return ESP_FAIL;
     }
@@ -232,7 +241,7 @@ static esp_err_t cron_save_jobs(void)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Saved %d cron jobs to %s", s_job_count, MIMI_CRON_FILE);
+    ESP_LOGI(TAG, "Saved %d cron jobs to %s", s_job_count, path);
     return ESP_OK;
 }
 
@@ -376,7 +385,7 @@ void cron_service_stop(void)
 {
     if (s_cron_task) {
         vTaskDelete(s_cron_task);
-        s_cron_task = NULL;
+        s_cron_task = 0;
         ESP_LOGI(TAG, "Cron service stopped");
     }
 }

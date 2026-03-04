@@ -1,11 +1,11 @@
 #pragma once
 
-#include "esp_err.h"
+#include "linux/linux_compat.h"
 #include <stddef.h>
 
 /**
  * Initialize skills system.
- * Installs built-in skill files to SPIFFS if they don't already exist.
+ * Installs built-in skill files if they don't already exist.
  */
 esp_err_t skill_loader_init(void);
 
