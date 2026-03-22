@@ -23,6 +23,7 @@ find_library(LIBWEBSOCKETS_LIBRARY NAMES websockets libwebsockets)
 
 set(MIMICLAW_SOURCES
     main/agent/agent_loop.c
+    main/agent/agent_trace.c
     main/agent/context_builder.c
     main/bus/message_bus.c
     main/cli/serial_cli.c
@@ -44,6 +45,7 @@ set(MIMICLAW_SOURCES
     main/tools/tool_files.c
     main/tools/tool_get_time.c
     main/tools/tool_registry.c
+    main/tools/tool_run_javascript.c
     main/tools/tool_web_search.c
 )
 

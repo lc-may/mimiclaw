@@ -1,4 +1,5 @@
 #include "agent_loop.h"
+#include "agent/agent_trace.h"
 #include "agent/context_builder.h"
 #include "mimi_config.h"
 #include "bus/message_bus.h"
@@ -13,7 +14,7 @@
 
 static const char *TAG = "agent";
 
-#define TOOL_OUTPUT_SIZE  (8 * 1024)
+#define TOOL_OUTPUT_SIZE  (64 * 1024)
 
 /* Build the assistant content array from llm_response_t for the messages history.
  * Returns a cJSON array with text and tool_use blocks. */
@@ -135,7 +136,7 @@ static char *patch_tool_input_with_context(const llm_tool_call_t *call, const mi
 
 /* Build the user message with tool_result blocks */
 static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *msg,
-                                 char *tool_output, size_t tool_output_size)
+                                 char *tool_output, size_t tool_output_size, int iteration)
 {
     cJSON *content = cJSON_CreateArray();
 
@@ -149,7 +150,31 @@ static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *m
 
         /* Execute tool */
         tool_output[0] = '\0';
-        tool_registry_execute(call->name, tool_input, tool_output, tool_output_size);
+        if (strcmp(call->name, "$web_search") == 0) {
+            /* Kimi builtin: echo arguments JSON for Moonshot to run search server-side */
+            cJSON *args = cJSON_Parse(tool_input);
+            if (args) {
+                char *normalized = cJSON_PrintUnformatted(args);
+                cJSON_Delete(args);
+                if (normalized) {
+                    size_t n = strlen(normalized);
+                    if (n < tool_output_size) {
+                        memcpy(tool_output, normalized, n + 1);
+                    } else {
+                        snprintf(tool_output, tool_output_size, "%s", tool_input);
+                    }
+                    free(normalized);
+                } else {
+                    snprintf(tool_output, tool_output_size, "%s", tool_input);
+                }
+            } else {
+                snprintf(tool_output, tool_output_size, "%s", tool_input);
+            }
+        } else {
+            tool_registry_execute(call->name, tool_input, tool_output, tool_output_size);
+        }
+        agent_trace_tool_call(msg->channel, msg->chat_id, iteration, call->name, tool_input,
+                              tool_output);
         free(patched_input);
 
         ESP_LOGI(TAG, "Tool %s result: %d bytes", call->name, (int)strlen(tool_output));
@@ -158,6 +183,7 @@ static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *m
         cJSON *result_block = cJSON_CreateObject();
         cJSON_AddStringToObject(result_block, "type", "tool_result");
         cJSON_AddStringToObject(result_block, "tool_use_id", call->id);
+        cJSON_AddStringToObject(result_block, "name", call->name);
         cJSON_AddStringToObject(result_block, "content", tool_output);
         cJSON_AddItemToArray(content, result_block);
     }
@@ -206,6 +232,8 @@ static void agent_loop_task(void *arg)
         cJSON_AddStringToObject(user_msg, "content", msg.content);
         cJSON_AddItemToArray(messages, user_msg);
 
+        agent_trace_turn_start(msg.channel, msg.chat_id, msg.content);
+
         /* 4. ReAct loop */
         char *final_text = NULL;
         int iteration = 0;
@@ -230,13 +258,18 @@ static void agent_loop_task(void *arg)
             }
 #endif
 
+            agent_trace_llm_iteration(msg.channel, msg.chat_id, iteration, system_prompt, messages);
+
             llm_response_t resp;
             err = llm_chat_tools(system_prompt, messages, tools_json, &resp);
 
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "LLM call failed: %s", esp_err_to_name(err));
+                agent_trace_llm_failed(msg.channel, msg.chat_id, iteration, err);
                 break;
             }
+
+            agent_trace_llm_response(msg.channel, msg.chat_id, iteration, &resp);
 
             if (!resp.tool_use) {
                 /* Normal completion — save final text and break */
@@ -256,7 +289,8 @@ static void agent_loop_task(void *arg)
             cJSON_AddItemToArray(messages, asst_msg);
 
             /* Execute tools and append results */
-            cJSON *tool_results = build_tool_results(&resp, &msg, tool_output, TOOL_OUTPUT_SIZE);
+            cJSON *tool_results = build_tool_results(&resp, &msg, tool_output, TOOL_OUTPUT_SIZE,
+                                                     iteration);
             cJSON *result_msg = cJSON_CreateObject();
             cJSON_AddStringToObject(result_msg, "role", "user");
             cJSON_AddItemToObject(result_msg, "content", tool_results);
@@ -267,6 +301,14 @@ static void agent_loop_task(void *arg)
         }
 
         cJSON_Delete(messages);
+
+        if (final_text && final_text[0]) {
+            agent_trace_turn_end(msg.channel, msg.chat_id, final_text);
+        } else {
+            const char *terr = llm_get_last_error();
+            agent_trace_turn_error(msg.channel, msg.chat_id,
+                                   terr && terr[0] ? terr : "empty or failed response");
+        }
 
         /* 5. Send response */
         if (final_text && final_text[0]) {

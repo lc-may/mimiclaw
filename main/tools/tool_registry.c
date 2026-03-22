@@ -4,6 +4,7 @@
 #include "tools/tool_get_time.h"
 #include "tools/tool_files.h"
 #include "tools/tool_cron.h"
+#include "tools/tool_run_javascript.h"
 
 #include <string.h>
 #include "linux/linux_compat.h"
@@ -175,6 +176,28 @@ esp_err_t tool_registry_init(void)
         .execute = tool_cron_remove_execute,
     };
     register_tool(&cr);
+
+    /* Register run_javascript (MicroQuickJS mqjs subprocess) */
+    mimi_tool_t rj = {
+        .name = "run_javascript",
+        .description =
+            "Execute JavaScript using the host mqjs binary (MicroQuickJS). Language is an ES5-aligned "
+            "subset with stricter rules; see mquickjs README for details (e.g. for-of over arrays, typed "
+            "arrays, globalThis, **). Scripts are stored under " MIMI_DATA_HOME "/llm_tools/js/. "
+            "Provide filename (basename only, e.g. task.js). Include script to write or overwrite the file "
+            "before running. Build mqjs with: make -C mquickjs, or set MIMICLAW_MQJS to the mqjs path.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{"
+            "\"filename\":{\"type\":\"string\",\"description\":\"Basename only, must end with .js (safe "
+            "characters)\"},"
+            "\"script\":{\"type\":\"string\",\"description\":\"Optional full source to write to the file "
+            "before execution\"}"
+            "},"
+            "\"required\":[\"filename\"]}",
+        .execute = tool_run_javascript_execute,
+    };
+    register_tool(&rj);
 
     build_tools_json();
 

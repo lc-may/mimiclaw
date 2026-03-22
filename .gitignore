@@ -46,3 +46,7 @@ nanobot/
 .DS_Store
 Thumbs.db
 references/
+.gitnexus
+
+# LLM-generated JS under repo (runtime uses ~/.mimiclaw/llm_tools/js)
+llm_tools/js/*.js

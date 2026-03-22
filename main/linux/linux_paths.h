@@ -38,3 +38,4 @@ int mimi_ensure_data_dirs(void);
 #define MIMI_PATH_CRON     "cron.json"
 #define MIMI_PATH_SESSIONS "sessions/"
 #define MIMI_PATH_SKILLS   "skills/"
+#define MIMI_PATH_LLM_TOOLS_JS "llm_tools/js/"

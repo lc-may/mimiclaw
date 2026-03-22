@@ -146,6 +146,18 @@ esp_err_t session_clear(const char *chat_id)
     return ESP_ERR_NOT_FOUND;
 }
 
+/** Listed in session_list: canonical tg_<id>.jsonl or ws_<id>.jsonl (no tg_ prefix). */
+static bool session_list_match(const char *name)
+{
+    if (!strstr(name, ".jsonl")) {
+        return false;
+    }
+    if (strstr(name, "tg_")) {
+        return true;
+    }
+    return strncmp(name, "ws_", 3) == 0;
+}
+
 void session_list(void)
 {
     char session_dir[256];
@@ -154,20 +166,24 @@ void session_list(void)
     DIR *dir = opendir(session_dir);
     if (!dir) {
         ESP_LOGW(TAG, "Cannot open sessions directory");
+        printf("  (cannot open sessions directory)\n");
         return;
     }
 
     struct dirent *entry;
     int count = 0;
     while ((entry = readdir(dir)) != NULL) {
-        if (strstr(entry->d_name, "tg_") && strstr(entry->d_name, ".jsonl")) {
-            ESP_LOGI(TAG, "  Session: %s", entry->d_name);
-            count++;
+        if (!session_list_match(entry->d_name)) {
+            continue;
         }
+        printf("  %s\n", entry->d_name);
+        ESP_LOGI(TAG, "  Session: %s", entry->d_name);
+        count++;
     }
     closedir(dir);
 
     if (count == 0) {
+        printf("  (no session files)\n");
         ESP_LOGI(TAG, "  No sessions found");
     }
 }

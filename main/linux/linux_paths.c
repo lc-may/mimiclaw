@@ -81,13 +81,25 @@ int mimi_ensure_data_dirs(void) {
     }
 
     /* Create subdirectories */
-    const char *subdirs[] = {"config", "memory", "sessions", "skills", NULL};
+    const char *subdirs[] = {"config", "memory", "sessions", "skills", "logs", NULL};
     for (int i = 0; subdirs[i]; i++) {
         snprintf(path, sizeof(path), "%s/%s", base, subdirs[i]);
         if (mkdir(path, 0755) != 0 && errno != EEXIST) {
             ESP_LOGE(TAG, "Failed to create %s: %s", path, strerror(errno));
             return -1;
         }
+    }
+
+    /* llm_tools/js for MicroQuickJS (mqjs) tool scripts */
+    snprintf(path, sizeof(path), "%s/llm_tools", base);
+    if (mkdir(path, 0755) != 0 && errno != EEXIST) {
+        ESP_LOGE(TAG, "Failed to create %s: %s", path, strerror(errno));
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/llm_tools/js", base);
+    if (mkdir(path, 0755) != 0 && errno != EEXIST) {
+        ESP_LOGE(TAG, "Failed to create %s: %s", path, strerror(errno));
+        return -1;
     }
 
     ESP_LOGI(TAG, "Data directories ready at %s", base);

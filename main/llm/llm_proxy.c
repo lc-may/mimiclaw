@@ -303,6 +303,28 @@ static const char *llm_api_url(void)
     return effective_url;
 }
 
+/**
+ * Kimi K2.5 (Moonshot OpenAI-compatible API) enables "thinking" by default.
+ * Without reasoning_content in multi-turn tool calls, the API returns 400.
+ * See: https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart
+ */
+static bool llm_should_disable_moonshot_thinking(void)
+{
+    /* Dedicated thinking models cannot disable reasoning */
+    if (strstr(s_model, "kimi-k2-thinking") != NULL) {
+        return false;
+    }
+
+    const char *url = llm_api_url();
+    if (url && strstr(url, "moonshot") != NULL) {
+        return true;
+    }
+    if (strncmp(s_model, "kimi-", 5) == 0) {
+        return true;
+    }
+    return false;
+}
+
 /* ── Init ─────────────────────────────────────────────────────── */
 
 esp_err_t llm_proxy_init(void)
@@ -485,7 +507,11 @@ static esp_err_t llm_http_call(const char *post_data, resp_buf_t *rb, int *out_s
     }
 }
 
-static cJSON *convert_tools_openai(const char *tools_json)
+/**
+ * @param omit_function_name  If non-NULL, omit registry tool with this OpenAI function name
+ *                            (e.g. "web_search" when Kimi builtin $web_search is used).
+ */
+static cJSON *convert_tools_openai(const char *tools_json, const char *omit_function_name)
 {
     if (!tools_json) return NULL;
     cJSON *arr = cJSON_Parse(tools_json);
@@ -500,6 +526,9 @@ static cJSON *convert_tools_openai(const char *tools_json)
         cJSON *desc = cJSON_GetObjectItem(tool, "description");
         cJSON *schema = cJSON_GetObjectItem(tool, "input_schema");
         if (!name || !cJSON_IsString(name)) continue;
+        if (omit_function_name && strcmp(name->valuestring, omit_function_name) == 0) {
+            continue;
+        }
 
         cJSON *func = cJSON_CreateObject();
         cJSON_AddStringToObject(func, "name", name->valuestring);
@@ -518,6 +547,25 @@ static cJSON *convert_tools_openai(const char *tools_json)
     cJSON_Delete(arr);
     return out;
 }
+
+#if MIMI_KIMI_BUILTIN_WEB_SEARCH
+/** Kimi API: https://platform.moonshot.cn/docs/guide/use-web-search — only with thinking disabled */
+static void append_kimi_web_search_builtin(cJSON *tools_array)
+{
+    if (!tools_array || !cJSON_IsArray(tools_array)) {
+        return;
+    }
+    if (!provider_is_openai() || !llm_should_disable_moonshot_thinking()) {
+        return;
+    }
+    cJSON *builtin = cJSON_CreateObject();
+    cJSON_AddStringToObject(builtin, "type", "builtin_function");
+    cJSON *fn = cJSON_CreateObject();
+    cJSON_AddStringToObject(fn, "name", "$web_search");
+    cJSON_AddItemToObject(builtin, "function", fn);
+    cJSON_AddItemToArray(tools_array, builtin);
+}
+#endif
 
 static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages)
 {
@@ -597,6 +645,9 @@ static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages
             }
             if (text_buf) {
                 cJSON_AddStringToObject(m, "content", text_buf);
+            } else if (tool_calls) {
+                /* OpenAI-style: assistant with only tool_calls uses content null, not "" */
+                cJSON_AddItemToObject(m, "content", cJSON_CreateNull());
             } else {
                 cJSON_AddStringToObject(m, "content", "");
             }
@@ -616,10 +667,14 @@ static cJSON *convert_messages_openai(const char *system_prompt, cJSON *messages
                 if (btype && cJSON_IsString(btype) && strcmp(btype->valuestring, "tool_result") == 0) {
                     cJSON *tool_id = cJSON_GetObjectItem(block, "tool_use_id");
                     cJSON *tcontent = cJSON_GetObjectItem(block, "content");
+                    cJSON *tname = cJSON_GetObjectItem(block, "name");
                     if (!tool_id || !cJSON_IsString(tool_id)) continue;
                     cJSON *tm = cJSON_CreateObject();
                     cJSON_AddStringToObject(tm, "role", "tool");
                     cJSON_AddStringToObject(tm, "tool_call_id", tool_id->valuestring);
+                    if (tname && cJSON_IsString(tname)) {
+                        cJSON_AddStringToObject(tm, "name", tname->valuestring);
+                    }
                     if (tcontent && cJSON_IsString(tcontent)) {
                         cJSON_AddStringToObject(tm, "content", tcontent->valuestring);
                     } else {
@@ -696,8 +751,18 @@ esp_err_t llm_chat_tools(const char *system_prompt,
         cJSON_AddItemToObject(body, "messages", openai_msgs);
 
         if (tools_json) {
-            cJSON *tools = convert_tools_openai(tools_json);
+            const char *omit_brave = NULL;
+#if MIMI_KIMI_BUILTIN_WEB_SEARCH
+            /* Kimi search runs server-side after $web_search echo; do not offer Brave web_search */
+            if (provider_is_openai() && llm_should_disable_moonshot_thinking()) {
+                omit_brave = "web_search";
+            }
+#endif
+            cJSON *tools = convert_tools_openai(tools_json, omit_brave);
             if (tools) {
+#if MIMI_KIMI_BUILTIN_WEB_SEARCH
+                append_kimi_web_search_builtin(tools);
+#endif
                 cJSON_AddItemToObject(body, "tools", tools);
                 cJSON_AddStringToObject(body, "tool_choice", "auto");
             }
@@ -716,6 +781,12 @@ esp_err_t llm_chat_tools(const char *system_prompt,
                 cJSON_AddItemToObject(body, "tools", tools);
             }
         }
+    }
+
+    if (provider_is_openai() && llm_should_disable_moonshot_thinking()) {
+        cJSON *thinking = cJSON_CreateObject();
+        cJSON_AddStringToObject(thinking, "type", "disabled");
+        cJSON_AddItemToObject(body, "thinking", thinking);
     }
 
     char *post_data = cJSON_PrintUnformatted(body);

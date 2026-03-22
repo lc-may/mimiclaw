@@ -488,13 +488,14 @@ static int cmd_tool_exec(int argc, char **argv)
     const char *tool_name = argv[1];
     const char *input_json = (argc >= 3) ? argv[2] : "{}";
 
-    char *output = calloc(1, 4096);
+    enum { TOOL_EXEC_BUF = 64 * 1024 };
+    char *output = calloc(1, TOOL_EXEC_BUF);
     if (!output) {
         printf("Out of memory.\n");
         return 1;
     }
 
-    esp_err_t err = tool_registry_execute(tool_name, input_json, output, 4096);
+    esp_err_t err = tool_registry_execute(tool_name, input_json, output, TOOL_EXEC_BUF);
     printf("tool_exec status: %s\n", esp_err_to_name(err));
     printf("%s\n", output[0] ? output : "(empty)");
     free(output);
